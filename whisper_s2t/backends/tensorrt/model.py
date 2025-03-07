@@ -109,12 +109,13 @@ class WhisperModelTRT(WhisperModel):
         self.model = WhisperTRT(self.model_path)
         
         # Load tokenizer
-        tokenizer_name =  "multilingual" if self.model.is_multilingual else "gpt2"
+        tokenizer_name = "multilingual" if self.model.is_multilingual else "gpt2"
         tiktoken_tokenizer = get_tiktoken_tokenizer(tokenizer_name, self.model.encoder.num_languages, self.model_path)
         tokenizer = Tokenizer(tiktoken_tokenizer, self.model.is_multilingual)
 
         if self.asr_options['word_timestamps']:
-            self.aligner_model_path = download_model(self.asr_options['word_aligner_model'])
+            model_type = os.path.basename(self.asr_options['word_aligner_model'])
+            self.aligner_model_path = download_model(model_type, self.asr_options['word_aligner_model'])
             self.aligner_model = ctranslate2.models.Whisper(self.aligner_model_path,
                                             device=device,
                                             device_index=device_index,
