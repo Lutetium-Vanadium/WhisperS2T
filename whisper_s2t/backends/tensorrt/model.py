@@ -4,12 +4,13 @@ import ctranslate2
 import numpy as np
 
 from .trt_model import WhisperTRT
-from .tokenizer import Tokenizer
+from .tokenizer import Tokenizer, get_tiktoken_tokenizer
 from .hf_utils import download_model
 from .engine_builder import build_trt_engine, TRTBuilderConfig, load_trt_build_config
 
 
 from .. import WhisperModel
+from ...audio import LogMelSpectogram
 from ...configs import *
 
 
@@ -108,17 +109,18 @@ class WhisperModelTRT(WhisperModel):
         self.model = WhisperTRT(self.model_path)
         
         # Load tokenizer
-        tokenizer_file = os.path.join(self.model_path, "tokenizer.json")
-        tokenizer = Tokenizer(tokenizers.Tokenizer.from_file(tokenizer_file), self.model.is_multilingual)
+        tokenizer_name =  "multilingual" if self.model.is_multilingual else "gpt2"
+        tiktoken_tokenizer = get_tiktoken_tokenizer(tokenizer_name, self.model.encoder.num_languages, self.model_path)
+        tokenizer = Tokenizer(tiktoken_tokenizer, self.model.is_multilingual)
 
         if self.asr_options['word_timestamps']:
             self.aligner_model_path = download_model(self.asr_options['word_aligner_model'])
             self.aligner_model = ctranslate2.models.Whisper(self.aligner_model_path,
-                                                            device=device,
-                                                            device_index=device_index,
-                                                            compute_type=compute_type,
-                                                            intra_threads=cpu_threads,
-                                                            inter_threads=num_workers)
+                                            device=device,
+                                            device_index=device_index,
+                                            compute_type=compute_type,
+                                            intra_threads=cpu_threads,
+                                            inter_threads=num_workers)
         
         self.generate_kwargs = {
             "end_id": tokenizer.eot,
@@ -140,6 +142,13 @@ class WhisperModelTRT(WhisperModel):
             max_text_token_len=max_text_token_len,
             **model_kwargs
         )
+
+    def _init_dependables(self):
+        super()._init_dependables()
+
+        if self.asr_options['word_timestamps']:
+            # Load Pre Processor for aligner model
+            self.aligner_preprocessor = LogMelSpectogram(n_mels=80).to(self.device)
 
     def update_generation_kwargs(self, params={}):
         self.generate_kwargs.update(params)
@@ -230,9 +239,9 @@ class WhisperModelTRT(WhisperModel):
 
         return word_timings
     
-    def generate_segment_batched(self, features, prompts, seq_lens, seg_metadata):
-
-        result = self.model.generate(features,
+    def generate_segment_batched(self, signals, prompts, seq_lens, seg_metadata):
+        mels, seq_len = self.preprocessor(signals, seq_lens)
+        result = self.model.generate(mels.to(self.device),
                                      prompts,
                                      **self.generate_kwargs)
         
@@ -245,7 +254,8 @@ class WhisperModelTRT(WhisperModel):
         if self.asr_options['word_timestamps']:
             text_tokens = [[_t for _t in x[0] if _t < self.tokenizer.eot]+[self.tokenizer.eot] for x in result]
             sot_seqs = [tuple(_[-4:]) for _ in prompts]
-            word_timings = self.align_words(features, texts, text_tokens, sot_seqs, seq_lens, seg_metadata)
+            features, seq_lens = self.aligner_preprocessor(signals, seq_lens)
+            word_timings = self.align_words(features.to(self.device), texts, text_tokens, sot_seqs, seq_lens, seg_metadata)
 
             for _response, _word_timings in zip(response, word_timings):
                 _response['word_timestamps'] = _word_timings

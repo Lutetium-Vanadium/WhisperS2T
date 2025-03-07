@@ -109,7 +109,7 @@ class WhisperModel(ABC):
     @abstractmethod
     def generate_segment_batched(self, features, prompts):
         pass
-        
+
     @torch.no_grad()
     def transcribe(self, audio_files, lang_codes=None, tasks=None, initial_prompts=None, batch_size=8):
         
@@ -139,8 +139,7 @@ class WhisperModel(ABC):
         pbar_pos = 0
         with tqdm(total=len(audio_files)*100, desc=f"Transcribing") as pbar:
             for signals, prompts, seq_len, seg_metadata, pbar_update in self.data_loader(audio_files, lang_codes, tasks, initial_prompts, batch_size=batch_size, use_vad=False):
-                mels, seq_len = self.preprocessor(signals, seq_len)
-                res = self.generate_segment_batched(mels.to(self.device), prompts, seq_len, seg_metadata)
+                res = self.generate_segment_batched(signals, prompts, seq_len, seg_metadata)
 
                 for res_idx, _seg_metadata in enumerate(seg_metadata):
                     responses[_seg_metadata['file_id']].append({**res[res_idx],

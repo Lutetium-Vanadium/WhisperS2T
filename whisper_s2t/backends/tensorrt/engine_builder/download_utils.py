@@ -14,11 +14,13 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 _MODELS = {
     "large-v2": "https://openaipublic.azureedge.net/main/whisper/models/81f7c96c852ee8fc832187b0132e569d6c3065a3252ed18e56effd0b6a73e524/large-v2.pt",
     "large-v3": "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt",
+    "large-v3-turbo": "https://openaipublic.azureedge.net/main/whisper/models/aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a/large-v3-turbo.pt",
 }
 
 _TOKENIZER = {
     "large-v2": "https://huggingface.co/Systran/faster-whisper-large-v2/raw/main/tokenizer.json",
     "large-v3": "https://huggingface.co/Systran/faster-whisper-large-v3/raw/main/tokenizer.json",
+    "large-v3-turbo": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/blob/main/tokenizer.json",
 }
 
 def download_model(name):
