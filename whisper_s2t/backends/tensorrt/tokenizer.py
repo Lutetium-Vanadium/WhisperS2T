@@ -220,7 +220,7 @@ class Tokenizer:
         return sequence
 
     def encode(self, text):
-        return self.tokenizer.encode(text, add_special_tokens=False).ids
+        return self.tokenizer.encode(text)
 
     def decode(self, tokens):
         text_tokens = [token for token in tokens if token < self.eot]
@@ -231,7 +231,7 @@ class Tokenizer:
         for tk in tokens:
             res.append([token for token in tk if token < self.eot])
 
-        return self.tokenizer.decode_batch(res)
+        return [self.tokenizer.decode(t) for t in res]
     
     def split_tokens_on_unicode(self, text, tokens):
         replacement_char = "\ufffd"

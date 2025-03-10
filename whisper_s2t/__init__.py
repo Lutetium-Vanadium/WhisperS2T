@@ -13,7 +13,7 @@ def load_model(model_identifier="large-v2",
                backend='CTranslate2',
                **model_kwargs):
     
-    if 'large-v3' in model_identifier or 'large_v3' in model_identifier:
+    if 'large-v3' in model_identifier or 'large_v3' in model_identifier or 'turbo' in model_identifier:
         model_kwargs['n_mels'] = 128
     elif (model_identifier in ['distil-large-v2']) and (backend.lower() not in ["huggingface", "hf"]):
         print(f"Switching backend to HuggingFace. Distill whisper is only supported with HuggingFace backend.")

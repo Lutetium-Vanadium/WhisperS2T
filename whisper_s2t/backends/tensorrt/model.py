@@ -2,6 +2,7 @@ import os
 import tokenizers
 import ctranslate2
 import numpy as np
+import torch
 
 from .trt_model import WhisperTRT
 from .tokenizer import Tokenizer, get_tiktoken_tokenizer
@@ -144,12 +145,20 @@ class WhisperModelTRT(WhisperModel):
             **model_kwargs
         )
 
-    def _init_dependables(self):
-        super()._init_dependables()
+    @torch.no_grad()
+    def detect_language(
+        self, audio_signal: torch.Tensor,
+    ):
+        audio_signal = audio_signal.unsqueeze(0)
+        mel, _, seq_len = self.get_all_mels(audio_signal, torch.Tensor())
 
-        if self.asr_options['word_timestamps']:
-            # Load Pre Processor for aligner model
-            self.aligner_preprocessor = LogMelSpectogram(n_mels=80).to(self.device)
+        single = mel.ndim == 2
+        if single:
+            mel = mel.unsqueeze(0)
+        probs = self.model.detect_language(mel,self.tokenizer)
+        most_likely = max(probs, key=probs.get)
+        return most_likely
+
 
     def update_generation_kwargs(self, params={}):
         self.generate_kwargs.update(params)
@@ -239,15 +248,14 @@ class WhisperModelTRT(WhisperModel):
             word_timings.append(_word_timings)
 
         return word_timings
-    
-    def generate_segment_batched(self, signals, prompts, seq_lens, seg_metadata):
-        mels, seq_len = self.preprocessor(signals, seq_lens)
-        result = self.model.generate(mels.to(self.device),
+
+    def generate_segment_batched(self, features, features_80, prompts, seq_lens, seg_metadata):
+        result = self.model.generate(features,
                                      prompts,
                                      **self.generate_kwargs)
-        
+
         texts = self.tokenizer.decode_batch([x[0] for x in result])
-        
+
         response = []
         for idx, r in enumerate(result):
             response.append({'text': texts[idx].strip()})
@@ -255,8 +263,7 @@ class WhisperModelTRT(WhisperModel):
         if self.asr_options['word_timestamps']:
             text_tokens = [[_t for _t in x[0] if _t < self.tokenizer.eot]+[self.tokenizer.eot] for x in result]
             sot_seqs = [tuple(_[-4:]) for _ in prompts]
-            features, seq_lens = self.aligner_preprocessor(signals, seq_lens)
-            word_timings = self.align_words(features.to(self.device), texts, text_tokens, sot_seqs, seq_lens, seg_metadata)
+            word_timings = self.align_words(features_80, texts, text_tokens, sot_seqs, seq_lens, seg_metadata)
 
             for _response, _word_timings in zip(response, word_timings):
                 _response['word_timestamps'] = _word_timings

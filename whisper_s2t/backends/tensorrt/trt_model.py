@@ -114,7 +114,6 @@ class WhisperEncoding:
         audio_features = outputs['encoder_output']
         return audio_features
 
-
 class WhisperDecoding:
 
     def __init__(self, engine_dir, runtime_mapping, debug_mode=False):
@@ -147,6 +146,7 @@ class WhisperDecoding:
             decoder_config['has_position_embedding'],
             dtype=self.decoder_config['dtype'],
             has_token_type_embedding=False,
+            gather_generation_logits=True,
         )
         decoder_generation_session = tensorrt_llm.runtime.GenerationSession(
             decoder_model_config,
@@ -155,6 +155,65 @@ class WhisperDecoding:
             debug_mode=debug_mode)
 
         return decoder_generation_session
+
+    def single_logits(self,
+                 decoder_input_ids,
+                 encoder_outputs,
+                 encoder_max_input_length,
+                 encoder_input_lengths):
+        batch_size = decoder_input_ids.shape[0]
+        decoder_input_lengths = torch.tensor([
+            decoder_input_ids.shape[-1]
+            for _ in range(decoder_input_ids.shape[0])
+        ],
+                                             dtype=torch.int32,
+                                             device='cuda')
+        decoder_max_input_length = torch.max(decoder_input_lengths).item()
+
+        cross_attention_mask = torch.ones(
+            [batch_size, 1, encoder_max_input_length]).int().cuda()
+
+        self.decoder_generation_session.setup(
+            decoder_input_lengths.size(0),
+            decoder_max_input_length,
+            1,
+            beam_width=1,
+            encoder_max_input_length=encoder_max_input_length)
+
+        torch.cuda.synchronize()
+
+        decoder_input_ids = decoder_input_ids.type(torch.int32).cuda()
+        if self.decoder_config['plugin_config']['remove_input_padding']:
+            # 50256 is the index of <pad> for all whisper models' decoder
+            WHISPER_PAD_TOKEN_ID = 50256
+            decoder_input_ids = remove_tensor_padding(
+                decoder_input_ids, pad_value=WHISPER_PAD_TOKEN_ID)
+            if encoder_outputs.dim() == 3:
+                encoder_output_lens = torch.full((encoder_outputs.shape[0], ),
+                                                 encoder_outputs.shape[1],
+                                                 dtype=torch.int32,
+                                                 device='cuda')
+
+                encoder_outputs = remove_tensor_padding(encoder_outputs,
+                                                        encoder_output_lens)
+        sampling_config = SamplingConfig(
+           end_id=50257,
+           pad_id=50257,
+        )
+
+        output_ids = self.decoder_generation_session.decode(
+            decoder_input_ids,
+            decoder_input_lengths,
+            sampling_config,
+            encoder_output=encoder_outputs,
+            encoder_input_lengths=encoder_input_lengths,
+            cross_attention_mask=cross_attention_mask,
+            return_dict=True,
+            output_generation_logits=True,
+        )
+        torch.cuda.synchronize()
+
+        return output_ids['generation_logits']
 
     def generate(self,
                  decoder_input_ids,
@@ -228,11 +287,66 @@ class WhisperTRT(object):
         self.is_multilingual = True
         self.compute_type = compute_type
 
+    @torch.no_grad()
+    def detect_language(
+        self, mel: torch.Tensor, tokenizer,
+    ):
+        """
+        Detect the spoken language in the audio, and return them as list of strings, along with the ids
+        of the most probable language tokens and the probability distribution over all language tokens.
+        This is performed outside the main decode loop in order to not interfere with kv-caching.
+
+        Returns
+        -------
+        language_tokens : Tensor, shape = (n_audio,)
+            ids of the most probable language tokens, which appears after the startoftranscript token.
+        language_probs : List[Dict[str, float]], length = n_audio
+            list of dictionaries containing the probability distribution over all languages.
+        """
+        single = mel.ndim == 2
+        if single:
+            mel = mel.unsqueeze(0)
+
+        encoder_input_lengths = torch.tensor(
+            [mel.shape[2] // 2 for _ in range(mel.shape[0])],
+            dtype=torch.int32,
+            device=mel.device)
+        encoder_max_input_length = torch.max(encoder_input_lengths).item()
+
+        n_audio = mel.shape[0]
+
+        # skip encoder forward pass if already-encoded audio features were given
+        if mel.shape[1] == self.n_mels:
+            mel = self.encode(mel)
+
+        # forward pass using a single token, startoftranscript
+        x = torch.tensor([[tokenizer.sot]] * n_audio).to(mel.device)  # [n_audio, 1]
+        logits = self.decoder.single_logits(x, mel, encoder_max_input_length, encoder_input_lengths)[0]
+
+        # collect detected languages; suppress all non-language tokens
+        mask = torch.ones(logits.shape[-1], dtype=torch.bool)
+        mask[list(tokenizer.lang_code_to_token_id.values())] = False
+        logits[:, mask] = -torch.inf
+        language_token_probs = logits.softmax(dim=-1).cpu()
+        language_probs = [
+            {
+                c: language_token_probs[i, j].item() for c, j in tokenizer.lang_code_to_token_id.items()
+            }
+            for i in range(n_audio)
+        ]
+
+        language_probs = language_probs[0]
+
+        return language_probs
+
     def encode(self, mel):
         return self.encoder.get_audio_features(mel)
 
     def generate(self, features, prompts, **generate_kwargs):
         features = features.half()
+
+        sampling_config = SamplingConfig(**generate_kwargs)
+
         encoder_input_lengths = torch.tensor(
             [features.shape[2] // 2 for _ in range(features.shape[0])],
             dtype=torch.int32,
@@ -244,8 +358,6 @@ class WhisperTRT(object):
 
         decoder_input_ids = torch.tensor(prompts)
 
-        sampling_config = SamplingConfig(**generate_kwargs)
-
         output_ids = self.decoder.generate(decoder_input_ids,
                                            features,
                                            sampling_config,
@@ -253,3 +365,4 @@ class WhisperTRT(object):
                                            encoder_input_lengths)
 
         return output_ids
+

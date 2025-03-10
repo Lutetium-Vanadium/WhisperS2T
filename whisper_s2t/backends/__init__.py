@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
 from abc import ABC, abstractmethod
+import ctranslate2
 
 from ..configs import *
 from ..data import WhisperDataLoader
@@ -86,19 +87,26 @@ class WhisperModel(ABC):
 
         # Load Pre Processor
         self.preprocessor = LogMelSpectogram(n_mels=self.n_mels).to(self.device)
+        if self.asr_options['word_timestamps']:
+            # Load Pre Processor for aligner model
+            if self.n_mels == 80:
+                self.aligner_preprocessor = self.preprocessor
+            else:
+                self.aligner_preprocessor = LogMelSpectogram(n_mels=80).to(self.device)
 
         # Load Speech Segmenter
         self.speech_segmenter = SpeechSegmenter(self.vad_model, device=self.device, **self.speech_segmenter_options)
 
         # Load Data Loader
         self.data_loader = WhisperDataLoader(
-            self.device, self.tokenizer, self.speech_segmenter, 
+            self.device, self.tokenizer, self.speech_segmenter,
             dta_padding=self.dta_padding,
-            without_timestamps=self.without_timestamps, 
-            max_speech_len=self.max_speech_len, 
-            max_initial_prompt_len=self.max_initial_prompt_len, 
+            without_timestamps=self.without_timestamps,
+            max_speech_len=self.max_speech_len,
+            max_initial_prompt_len=self.max_initial_prompt_len,
             use_dynamic_time_axis=self.use_dynamic_time_axis,
             merge_chunks=self.merge_chunks,
+            detect_lang=self.detect_language,
             file_io=self.file_io
         )
 
@@ -108,53 +116,66 @@ class WhisperModel(ABC):
         
         self._init_dependables()
 
-    
+    def get_all_mels(self, audio, seq_lens):
+        features, seq_lens = self.preprocessor(audio, seq_lens)
+
+        features_80 = None
+        if self.n_mels == 80:
+            features_80 = features
+        elif self.asr_options['word_timestamps']:
+            features_80, _ = self.aligner_preprocessor(audio, seq_lens)
+
+        return features.half(), features_80.half(), seq_lens
+
+    def detect_language(self, audio_signal):
+        audio_signal = audio_signal.unsqueeze(0) 
+        _, features, seq_len = self.get_all_mels(audio_signal, torch.Tensor())
+        lang_probs = self.aligner_model.detect_language(
+                    ctranslate2.StorageView.from_array(features))
+        # Comes as <|{lang}|>
+        return lang_probs[0][0][0][2:-2]
+
+
     @abstractmethod
-    def generate_segment_batched(self, features, prompts):
+    def generate_segment_batched(self, mels, mels_80, prompts):
         pass
 
     @torch.no_grad()
     def transcribe(self, audio_files, lang_codes=None, tasks=None, initial_prompts=None, batch_size=8):
-        
+
         # if lang_codes == None:
         #     lang_codes = len(audio_files)*['en']
-            
+
         # if tasks == None:
         #     tasks = len(audio_files)*['transcribe']
-        
+
         # if initial_prompts == None:
         #     initial_prompts = len(audio_files)*[None]
-            
+
         # responses = []
         # for signals, prompts, seq_len in self.data_loader(audio_files, lang_codes, tasks, initial_prompts, batch_size=batch_size, use_vad=False):
         #     mels, seq_len = self.preprocessor(signals, seq_len)
         #     res = self.generate_segment_batched(mels.to(self.device), prompts)
         #     responses.extend(res)
-        
+
         # return responses
 
         lang_codes = fix_batch_param(lang_codes, 'en', len(audio_files))
         tasks = fix_batch_param(tasks, 'transcribe', len(audio_files))
         initial_prompts = fix_batch_param(initial_prompts, None, len(audio_files))
-            
-        responses = [[] for _ in audio_files]
-        
-        pbar_pos = 0
-        with tqdm(total=len(audio_files)*100, desc=f"Transcribing") as pbar:
-            for signals, prompts, seq_len, seg_metadata, pbar_update in self.data_loader(audio_files, lang_codes, tasks, initial_prompts, batch_size=batch_size, use_vad=False):
-                res = self.generate_segment_batched(signals, prompts, seq_len, seg_metadata)
 
-                for res_idx, _seg_metadata in enumerate(seg_metadata):
-                    responses[_seg_metadata['file_id']].append({**res[res_idx],
-                                                                'start_time': round(_seg_metadata['start_time'], 3),
-                                                                'end_time': round(_seg_metadata['end_time'], 3)})
-                
-                if (pbar_pos) <= pbar.total:
-                    pbar_pos += pbar_update
-                    pbar.update(pbar_update)
-            
-            pbar.update(pbar.total-pbar_pos)
-        
+        responses = [[] for _ in audio_files]
+
+        for signals, prompts, seq_len, seg_metadata, pbar_update in self.data_loader(audio_files, lang_codes, tasks, initial_prompts, batch_size=batch_size, use_vad=False):
+            mels, mels_80, seq_len = self.get_all_mels(signals, seq_len)
+            res = self.generate_segment_batched(mels, mels_80, prompts, seq_len, seg_metadata)
+
+            for res_idx, _seg_metadata in enumerate(seg_metadata):
+                responses[_seg_metadata['file_id']].append({**res[res_idx],
+                                                            'lang': _seg_metadata['lang_code'],
+                                                            'start_time': round(_seg_metadata['start_time'], 3),
+                                                            'end_time': round(_seg_metadata['end_time'], 3)})
+
         return responses
 
     @torch.no_grad()

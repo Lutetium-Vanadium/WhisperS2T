@@ -127,9 +127,10 @@ class WhisperDataLoader:
                  without_timestamps=True, 
                  max_speech_len=29.0, 
                  max_initial_prompt_len=223,
-                 merge_chunks=True,
+                 merge_chunks=False,
                  use_dynamic_time_axis=False,
-                 file_io=True):
+                 file_io=True,
+                 detect_lang=None):
         
         self.device = device
         self.tokenizer = tokenizer
@@ -142,6 +143,10 @@ class WhisperDataLoader:
         self.use_dynamic_time_axis = use_dynamic_time_axis
         self.merge_chunks = merge_chunks
         self.audio_gen = audio_batch_generator if file_io else lambda x: x
+        self.detect_lang = detect_lang
+
+    def convert_audio(self, audio):
+        return torch.from_numpy(pad_or_trim(audio, length=N_SAMPLES)).to(self.device)
         
     def data_collate_fn(self, batch):
         if self.use_dynamic_time_axis:
@@ -149,7 +154,7 @@ class WhisperDataLoader:
         else:
             max_len = N_SAMPLES
 
-        signal_batch = torch.stack([torch.from_numpy(pad_or_trim(_[0], length=max_len)).to(self.device) for _ in batch])
+        signal_batch = torch.stack([self.convert_audio(_[0]) for _ in batch])
         seq_len = torch.tensor([_[3] for _ in batch]).to(self.device)
 
         prompt_batch = []
@@ -166,6 +171,9 @@ class WhisperDataLoader:
             return signal_batch, prompt_batch, seq_len
     
     def get_segmented_audio_signal(self, start_ends, audio_signal, file_id, lang, task, initial_prompt, sr=16000):
+        if lang is None or lang == 'auto':
+            assert self.detect_lang is not None, 'detect language not available for lang auto'
+            lang = self.detect_lang(self.convert_audio(audio_signal[:int(self.max_speech_len*sr)]))
 
         if initial_prompt:
             initial_prompt = " " + initial_prompt.strip()
@@ -231,7 +239,7 @@ class WhisperDataLoader:
         pbar_update = int(sum([pbar_update_len[_['file_id']] for _ in seg_metadata])*100)
 
         yield signal_batch, prompt_batch, seq_len, seg_metadata, pbar_update
-    
+
     def get_data_loader(self, audio_files, lang_codes, tasks, initial_prompts, batch_size=16):
         
         # dataset = WhisperDataset(audio_files, lang_codes, tasks, initial_prompts, self.tokenizer, 
