@@ -175,6 +175,9 @@ class WhisperDataLoader:
             assert self.detect_lang is not None, 'detect language not available for lang auto'
             lang = self.detect_lang(self.convert_audio(audio_signal[:int(self.max_speech_len*sr)]))
 
+        if callable(initial_prompt):
+            initial_prompt = initial_prompt(lang)
+
         if initial_prompt:
             initial_prompt = " " + initial_prompt.strip()
             initial_prompt_tokens = self.tokenizer.encode(initial_prompt)[-self.max_initial_prompt_len:]
