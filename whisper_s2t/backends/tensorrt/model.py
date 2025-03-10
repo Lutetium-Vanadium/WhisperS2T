@@ -146,7 +146,7 @@ class WhisperModelTRT(WhisperModel):
         )
 
     @torch.no_grad()
-    def detect_language(
+    def get_language_probs(
         self, audio_signal: torch.Tensor,
     ):
         audio_signal = audio_signal.unsqueeze(0)
@@ -155,9 +155,7 @@ class WhisperModelTRT(WhisperModel):
         single = mel.ndim == 2
         if single:
             mel = mel.unsqueeze(0)
-        probs = self.model.detect_language(mel,self.tokenizer)
-        most_likely = max(probs, key=probs.get)
-        return most_likely
+        return self.model.detect_language(mel,self.tokenizer)
 
 
     def update_generation_kwargs(self, params={}):

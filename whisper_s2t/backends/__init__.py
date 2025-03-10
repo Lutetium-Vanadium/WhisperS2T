@@ -49,6 +49,7 @@ class WhisperModel(ABC):
                  max_text_token_len=MAX_TEXT_TOKEN_LENGTH,
                  without_timestamps=True,
                  speech_segmenter_options={},
+                 pick_language=None,
                  file_io=True):
         
         # Configure Params
@@ -69,6 +70,11 @@ class WhisperModel(ABC):
         self.vad_model = vad_model
         self.speech_segmenter_options = speech_segmenter_options
         self.speech_segmenter_options['max_seg_len'] = self.max_speech_len
+
+        if pick_language is None:
+            pick_language = lambda probs: max(probs, key=probs.get)
+
+        self.pick_language = pick_language
 
         # Tokenizer
         if tokenizer is None:
@@ -127,13 +133,20 @@ class WhisperModel(ABC):
 
         return features.half(), features_80.half(), seq_lens
 
-    def detect_language(self, audio_signal):
+    def get_language_probs(self, audio_signal):
         audio_signal = audio_signal.unsqueeze(0) 
         _, features, seq_len = self.get_all_mels(audio_signal, torch.Tensor())
-        lang_probs = self.aligner_model.detect_language(
+        data = self.aligner_model.detect_language(
                     ctranslate2.StorageView.from_array(features))
-        # Comes as <|{lang}|>
-        return lang_probs[0][0][0][2:-2]
+        lang_probs = {}
+        for item in data[0]:  # Take only the outermost list at index 0
+            key = item[0][2:-2]  # Slice the string part of the tuple
+            value = item[1]      # Get the float part of the tuple
+            lang_probs[key] = value
+        return lang_probs
+
+    def detect_language(self, audio_signal):
+        return self.pick_language(self.get_language_probs(audio_signal))
 
 
     @abstractmethod
